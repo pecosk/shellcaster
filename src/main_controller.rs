@@ -104,6 +104,7 @@ impl MainController {
 
                 Message::Feed(FeedMsg::Error(feed)) => match feed.title {
                     Some(t) => {
+                        self.sync_counter -= 1;
                         self.notif_to_ui(format!("Error retrieving RSS feed for {t}."), true)
                     }
                     None => self.notif_to_ui("Error retrieving RSS feed.".to_string(), true),
