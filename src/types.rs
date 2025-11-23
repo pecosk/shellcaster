@@ -416,7 +416,7 @@ impl<T: Clone + Menuable> LockVec<T> {
     /// *not* the sense of the word here.
     pub fn filter_map<B, F>(&self, mut f: F) -> Vec<B>
     where F: FnMut(&T) -> Option<B> {
-        let (map, order, _) = self.borrow();
+        let (map, order, _filtered_unused) = self.borrow();
         return order
             .iter()
             .filter_map(|id| f(map.get(id).expect("Index error in LockVec")))

@@ -83,7 +83,7 @@ pub enum Scroll {
 }
 
 /// Simple enum to identify which menu is currently active.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 enum ActivePanel {
     PodcastMenu,
     EpisodeMenu,
@@ -433,16 +433,29 @@ impl<'a> Ui<'a> {
         self.n_row = n_row;
         self.n_col = n_col;
 
-        let (pod_col, ep_col, det_col) = Self::calculate_sizes(n_col);
+        let (pod_col, ep_col, det_col) = Self::calculate_adaptive_sizes(n_col, &self.active_panel);
 
-        self.podcast_menu.resize(n_row - 1, pod_col, 0);
-        self.episode_menu.resize(n_row - 1, ep_col, pod_col - 1);
+        // Resize podcast menu
+        if pod_col > 0 {
+            self.podcast_menu.resize(n_row - 1, pod_col, 0);
+            self.podcast_menu.redraw();
+        }
+
+        // Resize episode menu 
+        if ep_col > 0 {
+            let ep_start_x = if pod_col > 0 { pod_col - 1 } else { 0 };
+            self.episode_menu.resize(n_row - 1, ep_col, ep_start_x);
+            self.episode_menu.redraw();
+        }
+
         self.highlight_items();
 
+        // Handle details panel
         if self.details_panel.is_some() {
             if det_col > 0 {
                 let det = self.details_panel.as_mut().unwrap();
-                det.resize(n_row - 1, det_col, pod_col + ep_col - 2);
+                let det_start_x = if pod_col > 0 { pod_col + ep_col - 2 } else { ep_col - 1 };
+                det.resize(n_row - 1, det_col, det_start_x);
                 // resizing the menus may change which item is selected
                 self.update_details_panel();
             } else {
@@ -456,13 +469,14 @@ impl<'a> Ui<'a> {
                 }
             }
         } else if det_col > 0 {
+            let det_start_x = if pod_col > 0 { pod_col + ep_col - 2 } else { ep_col - 1 };
             self.details_panel = Some(DetailsPanel::new(
                 "Details".to_string(),
                 2,
                 self.colors.clone(),
                 n_row - 1,
                 det_col,
-                pod_col + ep_col - 2,
+                det_start_x,
                 (0, 1, 0, 1),
             ));
             self.update_details_panel();
@@ -490,6 +504,7 @@ impl<'a> Ui<'a> {
 
             UserAction::Left => {
                 if curr_pod_id.is_some() {
+                    let old_panel = self.active_panel.clone();
                     match self.active_panel {
                         ActivePanel::PodcastMenu => (),
                         ActivePanel::EpisodeMenu => {
@@ -502,11 +517,17 @@ impl<'a> Ui<'a> {
                             self.episode_menu.activate();
                         }
                     }
+                    
+                    // If panel changed and we're in adaptive mode, trigger resize
+                    if old_panel != self.active_panel && self.n_col <= crate::config::DETAILS_PANEL_LENGTH {
+                        self.resize(self.n_col, self.n_row);
+                    }
                 }
             }
 
             UserAction::Right => {
                 if curr_pod_id.is_some() && curr_ep_id.is_some() {
+                    let old_panel = self.active_panel.clone();
                     match self.active_panel {
                         ActivePanel::PodcastMenu => {
                             self.active_panel = ActivePanel::EpisodeMenu;
@@ -514,12 +535,17 @@ impl<'a> Ui<'a> {
                             self.episode_menu.activate();
                         }
                         ActivePanel::EpisodeMenu => {
-                            if self.details_panel.is_some() {
+                            if self.details_panel.is_some() || self.n_col <= crate::config::DETAILS_PANEL_LENGTH {
                                 self.active_panel = ActivePanel::DetailsPanel;
                                 self.episode_menu.deactivate(true);
                             }
                         }
                         ActivePanel::DetailsPanel => (),
+                    }
+                    
+                    // If panel changed and we're in adaptive mode, trigger resize
+                    if old_panel != self.active_panel && self.n_col <= crate::config::DETAILS_PANEL_LENGTH {
+                        self.resize(self.n_col, self.n_row);
                     }
                 }
             }
@@ -724,22 +750,55 @@ impl<'a> Ui<'a> {
 
     /// Calculates the number of columns to allocate for each of the
     /// main panels: podcast menu, episodes menu, and details panel; if
-    /// the screen is too small to display the details panel, this size
-    /// will be 0
+    /// the screen is too small to display all panels, this returns the
+    /// active panel plus one to the right
     pub fn calculate_sizes(n_col: u16) -> (u16, u16, u16) {
         let pod_col;
         let ep_col;
         let det_col;
         if n_col > crate::config::DETAILS_PANEL_LENGTH {
+            // Full 3-pane layout
             pod_col = (n_col + 2) / 3;
             ep_col = (n_col + 2) / 3;
             det_col = n_col + 2 - pod_col - ep_col;
         } else {
+            // 2-pane layout: show only podcast and episode menus
             pod_col = (n_col + 1) / 2;
             ep_col = n_col + 1 - pod_col;
             det_col = 0;
         }
         return (pod_col, ep_col, det_col);
+    }
+    
+    /// Calculates the adaptive layout based on active panel and available width.
+    /// Shows the active panel plus one to the right when space is limited.
+    pub fn calculate_adaptive_sizes(n_col: u16, active_panel: &ActivePanel) -> (u16, u16, u16) {
+        if n_col > crate::config::DETAILS_PANEL_LENGTH {
+            // Enough space for all 3 panels
+            return Self::calculate_sizes(n_col);
+        }
+        
+        // Limited space: show active panel + one to the right
+        match active_panel {
+            ActivePanel::PodcastMenu => {
+                // Show: Podcast + Episodes
+                let pod_col = (n_col + 1) / 2;
+                let ep_col = n_col + 1 - pod_col;
+                (pod_col, ep_col, 0)
+            }
+            ActivePanel::EpisodeMenu => {
+                // Show: Episodes + Details
+                let ep_col = (n_col + 1) / 2;
+                let det_col = n_col + 1 - ep_col;
+                (0, ep_col, det_col)
+            }
+            ActivePanel::DetailsPanel => {
+                // Show: Episodes + Details (can't go further right)
+                let ep_col = (n_col + 1) / 2;
+                let det_col = n_col + 1 - ep_col;
+                (0, ep_col, det_col)
+            }
+        }
     }
 
     /// Checks whether the user has downloaded any episodes for the
