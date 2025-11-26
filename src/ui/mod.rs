@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crossterm::{
     self, cursor,
-    event::{self, Event},
+    event::{self, Event, MouseButton, MouseEvent, MouseEventKind, EnableMouseCapture, DisableMouseCapture},
     execute, terminal,
 };
 use lazy_static::lazy_static;
@@ -84,10 +84,30 @@ pub enum Scroll {
 
 /// Simple enum to identify which menu is currently active.
 #[derive(Debug, Clone, PartialEq)]
-enum ActivePanel {
+pub(crate) enum ActivePanel {
     PodcastMenu,
     EpisodeMenu,
     DetailsPanel,
+}
+
+/// Mouse interaction state for tracking mousedown/drag/mouseup events
+#[derive(Debug, Clone)]
+struct MouseState {
+    is_mouse_down: bool,
+    mouse_down_panel: Option<ActivePanel>,
+    mouse_down_row: Option<u16>,
+    highlighted_during_drag: Option<u16>,
+}
+
+impl Default for MouseState {
+    fn default() -> Self {
+        Self {
+            is_mouse_down: false,
+            mouse_down_panel: None,
+            mouse_down_row: None,
+            highlighted_during_drag: None,
+        }
+    }
 }
 
 /// Struct containing all interface elements of the TUI. Functionally,
@@ -105,6 +125,7 @@ pub struct Ui<'a> {
     active_panel: ActivePanel,
     notif_win: NotifWin,
     popup_win: PopupWin<'a>,
+    mouse_state: MouseState,
 }
 
 impl<'a> Ui<'a> {
@@ -170,7 +191,8 @@ impl<'a> Ui<'a> {
             io::stdout(),
             terminal::EnterAlternateScreen,
             terminal::Clear(terminal::ClearType::All),
-            cursor::Hide
+            cursor::Hide,
+            EnableMouseCapture
         )
         .expect("Can't draw to screen.");
 
@@ -238,6 +260,7 @@ impl<'a> Ui<'a> {
             active_panel: ActivePanel::PodcastMenu,
             notif_win: notif_win,
             popup_win: popup_win,
+            mouse_state: MouseState::default(),
         };
     }
 
@@ -270,6 +293,9 @@ impl<'a> Ui<'a> {
         if event::poll(Duration::from_secs(0)).expect("Can't poll for inputs") {
             match event::read().expect("Can't read inputs") {
                 Event::Resize(n_col, n_row) => self.resize(n_col, n_row),
+                Event::Mouse(mouse_event) => {
+                    return self.handle_mouse_event(mouse_event);
+                }
                 Event::Key(input) => {
                     let (curr_pod_id, curr_ep_id) = self.get_current_ids();
 
@@ -422,10 +448,261 @@ impl<'a> Ui<'a> {
                         } // end of input match
                     }
                 }
-                _ => (),
             }
         } // end of poll()
         return UiMsg::Noop;
+    }
+
+    /// Handles mouse events for user interaction
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent) -> UiMsg {
+        match mouse_event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.handle_mouse_down(mouse_event.column, mouse_event.row)
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.handle_mouse_up(mouse_event.column, mouse_event.row)
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.handle_mouse_drag(mouse_event.column, mouse_event.row)
+            }
+            _ => UiMsg::Noop,
+        }
+    }
+
+    /// Handles mouse down events - highlights item for visual feedback (selection happens on mouseup)
+    fn handle_mouse_down(&mut self, col: u16, row: u16) -> UiMsg {
+        // Determine which panel and item was clicked
+        if let Some((panel, item_row)) = self.get_panel_and_row_from_coordinates(col, row) {
+            // Store mouse down state
+            self.mouse_state.is_mouse_down = true;
+            self.mouse_state.mouse_down_panel = Some(panel.clone());
+            self.mouse_state.mouse_down_row = Some(item_row);
+
+            // Highlight the item for visual feedback
+            match panel {
+                ActivePanel::PodcastMenu => {
+                    // Bounds checking is already done in get_panel_and_row_from_coordinates
+                    // Unhighlight current selection
+                    self.podcast_menu.unhighlight_item(self.podcast_menu.selected);
+                    // Highlight the clicked item
+                    self.podcast_menu.highlight_item(item_row, false); // false = not active highlighting
+                    self.mouse_state.highlighted_during_drag = Some(item_row);
+                }
+                ActivePanel::EpisodeMenu => {
+                    // Bounds checking is already done in get_panel_and_row_from_coordinates
+                    // Unhighlight current selection
+                    self.episode_menu.unhighlight_item(self.episode_menu.selected);
+                    // Highlight the clicked item
+                    self.episode_menu.highlight_item(item_row, false);
+                    self.mouse_state.highlighted_during_drag = Some(item_row);
+                }
+                _ => {} // Details panel doesn't have selectable items
+            }
+        }
+        UiMsg::Noop
+    }
+
+    /// Handles mouse up events - selects the item on which the mouseup occurs (after any drag sequence)
+    fn handle_mouse_up(&mut self, col: u16, row: u16) -> UiMsg {
+        if !self.mouse_state.is_mouse_down {
+            return UiMsg::Noop;
+        }
+
+        let result = if let Some((panel, item_row)) = self.get_panel_and_row_from_coordinates(col, row) {
+            // Select the item where mouse up occurs, regardless of where mouse down happened
+            match panel {
+                ActivePanel::PodcastMenu => {
+                    // Bounds checking is already done in get_panel_and_row_from_coordinates
+                    let old_panel = self.active_panel.clone();
+                    
+                    // Change active panel and update selection
+                    self.active_panel = ActivePanel::PodcastMenu;
+                    
+                    // Update selection to the item where mouseup occurred
+                    self.podcast_menu.selected = item_row;
+                    
+                    // Update menus and highlighting
+                    self.podcast_menu.activate();
+                    self.episode_menu.deactivate(true);
+                    
+                    // Update episode menu with episodes from selected podcast
+                    self.episode_menu.items = self.podcast_menu.get_episodes();
+                    self.episode_menu.top_row = 0;
+                    self.episode_menu.selected = self.episode_menu.start_row;
+                    
+                    // If panel changed and we're in adaptive mode, trigger resize
+                    if old_panel != self.active_panel && self.n_col <= crate::config::DETAILS_PANEL_LENGTH {
+                        self.resize(self.n_col, self.n_row);
+                    } else {
+                        self.update_menus();
+                        if self.details_panel.is_some() {
+                            self.update_details_panel();
+                        }
+                        io::stdout().flush().unwrap();
+                    }
+                    UiMsg::Noop
+                }
+                ActivePanel::EpisodeMenu => {
+                    // Bounds checking is already done in get_panel_and_row_from_coordinates
+                    let old_panel = self.active_panel.clone();
+                    
+                    // Change active panel and update selection
+                    self.active_panel = ActivePanel::EpisodeMenu;
+                    
+                    // Update selection to the item where mouseup occurred
+                    self.episode_menu.selected = item_row;
+                    
+                    // Update highlighting - only highlight podcast menu if it's visible
+                    let (pod_col, _ep_col, _det_col) = Self::calculate_adaptive_sizes(self.n_col, &self.active_panel);
+                    if pod_col > 0 {
+                        self.podcast_menu.highlight_selected();
+                    }
+                    self.episode_menu.activate();
+                    
+                    // If panel changed and we're in adaptive mode, trigger resize
+                    if old_panel != self.active_panel && self.n_col <= crate::config::DETAILS_PANEL_LENGTH {
+                        self.resize(self.n_col, self.n_row);
+                    } else {
+                        if self.details_panel.is_some() {
+                            self.update_details_panel();
+                        }
+                        io::stdout().flush().unwrap();
+                    }
+                    UiMsg::Noop
+                }
+                _ => UiMsg::Noop,
+            }
+        } else {
+            UiMsg::Noop
+        };
+
+        // Clean up mouse state and restore normal highlighting
+        self.cleanup_mouse_state();
+        result
+    }
+
+    /// Handles mouse drag events - updates highlighting as user drags
+    fn handle_mouse_drag(&mut self, col: u16, row: u16) -> UiMsg {
+        if !self.mouse_state.is_mouse_down {
+            return UiMsg::Noop;
+        }
+
+        if let Some((panel, item_row)) = self.get_panel_and_row_from_coordinates(col, row) {
+            // Only handle drag within the same panel as the original mouse down
+            if Some(panel.clone()) == self.mouse_state.mouse_down_panel {
+                // Unhighlight previously highlighted item during drag
+                if let Some(prev_row) = self.mouse_state.highlighted_during_drag {
+                    match panel {
+                        ActivePanel::PodcastMenu => {
+                            self.podcast_menu.unhighlight_item(prev_row);
+                        }
+                        ActivePanel::EpisodeMenu => {
+                            self.episode_menu.unhighlight_item(prev_row);
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Highlight new item
+                match panel {
+                    ActivePanel::PodcastMenu => {
+                        // Bounds checking is already done in get_panel_and_row_from_coordinates
+                        self.podcast_menu.highlight_item(item_row, false);
+                        self.mouse_state.highlighted_during_drag = Some(item_row);
+                    }
+                    ActivePanel::EpisodeMenu => {
+                        // Bounds checking is already done in get_panel_and_row_from_coordinates
+                        self.episode_menu.highlight_item(item_row, false);
+                        self.mouse_state.highlighted_during_drag = Some(item_row);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        UiMsg::Noop
+    }
+
+    /// Maps mouse coordinates to panel and row within that panel
+    fn get_panel_and_row_from_coordinates(&self, col: u16, row: u16) -> Option<(ActivePanel, u16)> {
+        let (pod_col, ep_col, det_col) = Self::calculate_adaptive_sizes(self.n_col, &self.active_panel);
+
+        // Account for panel borders: panels draw content at screen_row + 1 due to top border
+        // So we need to convert screen coordinates back to panel coordinates
+        
+        // In adaptive mode, some panels may be hidden (width = 0)
+        // We need to check which panels are actually visible and map coordinates accordingly
+        
+        // Check if click is in podcast menu (only if visible)
+        if pod_col > 0 && col < pod_col && row < self.n_row - 1 {
+            // Convert screen row to panel-relative row by subtracting 1 for the top border
+            if row > 0 { // Make sure we don't underflow
+                let panel_row = row - 1;
+                // Check if this panel row is within the menu area
+                if panel_row >= self.podcast_menu.start_row && panel_row < self.n_row - 2 {
+                    // Check if this row actually has a menu item
+                    let menu_idx = self.podcast_menu.get_menu_idx(panel_row);
+                    if menu_idx < self.podcast_menu.items.len(true) {
+                        return Some((ActivePanel::PodcastMenu, panel_row));
+                    }
+                }
+            }
+        }
+        
+        // Calculate episode menu start position based on whether podcast menu is visible
+        let ep_start_x = if pod_col > 0 { pod_col - 1 } else { 0 };
+        
+        // Check if click is in episode menu (only if visible)
+        if ep_col > 0 && col >= ep_start_x && col < ep_start_x + ep_col && row < self.n_row - 1 {
+            // Convert screen row to panel-relative row by subtracting 1 for the top border
+            if row > 0 { // Make sure we don't underflow
+                let panel_row = row - 1;
+                // Check if this panel row is within the menu area
+                if panel_row >= self.episode_menu.start_row && panel_row < self.n_row - 2 {
+                    // Check if this row actually has a menu item
+                    let menu_idx = self.episode_menu.get_menu_idx(panel_row);
+                    if menu_idx < self.episode_menu.items.len(true) {
+                        return Some((ActivePanel::EpisodeMenu, panel_row));
+                    }
+                }
+            }
+        }
+        
+        // Calculate details panel start position
+        let det_start_x = if pod_col > 0 && ep_col > 0 {
+            pod_col + ep_col - 2
+        } else if ep_col > 0 {
+            ep_col - 1
+        } else {
+            0
+        };
+        
+        // Check if click is in details panel (only if visible)
+        if det_col > 0 && col >= det_start_x && self.details_panel.is_some() {
+            return Some((ActivePanel::DetailsPanel, row));
+        }
+
+        None
+    }
+
+    /// Cleans up mouse state and restores normal menu highlighting
+    fn cleanup_mouse_state(&mut self) {
+        // Restore normal highlighting for currently selected items
+        if let Some(highlighted_row) = self.mouse_state.highlighted_during_drag {
+            match self.mouse_state.mouse_down_panel.as_ref() {
+                Some(ActivePanel::PodcastMenu) => {
+                    self.podcast_menu.unhighlight_item(highlighted_row);
+                    self.podcast_menu.highlight_selected();
+                }
+                Some(ActivePanel::EpisodeMenu) => {
+                    self.episode_menu.unhighlight_item(highlighted_row);
+                    self.episode_menu.highlight_selected();
+                }
+                _ => {}
+            }
+        }
+
+        // Reset mouse state
+        self.mouse_state = MouseState::default();
     }
 
     /// Resize all the windows on the screen and redraw them.
@@ -434,6 +711,13 @@ impl<'a> Ui<'a> {
         self.n_col = n_col;
 
         let (pod_col, ep_col, det_col) = Self::calculate_adaptive_sizes(n_col, &self.active_panel);
+
+        // Clear the entire screen to avoid overdraw issues when panels switch visibility
+        use crossterm::{execute, terminal};
+        execute!(
+            io::stdout(),
+            terminal::Clear(terminal::ClearType::All)
+        ).unwrap();
 
         // Resize podcast menu
         if pod_col > 0 {
@@ -880,14 +1164,22 @@ impl<'a> Ui<'a> {
     /// Forces the menus to check the list of podcasts/episodes again and
     /// update.
     pub fn update_menus(&mut self) {
-        self.podcast_menu.redraw();
+        // In adaptive mode, only redraw visible panels
+        let (pod_col, ep_col, _det_col) = Self::calculate_adaptive_sizes(self.n_col, &self.active_panel);
+        
+        if pod_col > 0 {
+            self.podcast_menu.redraw();
+        }
 
         self.episode_menu.items = if !self.podcast_menu.items.is_empty() {
             self.podcast_menu.get_episodes()
         } else {
             LockVec::new(Vec::new())
         };
-        self.episode_menu.redraw();
+        
+        if ep_col > 0 {
+            self.episode_menu.redraw();
+        }
         self.highlight_items();
     }
 
@@ -923,7 +1215,8 @@ impl<'a> Ui<'a> {
             io::stdout(),
             terminal::Clear(terminal::ClearType::All),
             terminal::LeaveAlternateScreen,
-            cursor::Show
+            cursor::Show,
+            DisableMouseCapture
         )
         .unwrap();
     }

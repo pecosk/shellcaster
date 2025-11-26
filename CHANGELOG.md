@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.1.0 (TBD)
+### New Features
+- **Mouse/Touch Support**: Added comprehensive mouse interaction support
+  - Click/mouse-up to select podcasts and episodes
+  - Visual feedback during mouse down/drag operations
+  - Scroll wheel support for navigating lists
+  - Works alongside existing keyboard shortcuts
+  - Compatible with most modern terminal emulators
+
 ## v2.0.1 (2022-03-03)
 - Bug fix release to handle improper timeouts on HTTP requests
 
