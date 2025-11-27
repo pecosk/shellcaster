@@ -893,13 +893,23 @@ impl<'a> Ui<'a> {
 
     /// Forces the menus to redraw the highlighted item.
     pub fn highlight_items(&mut self) {
+        // Check which panels are visible based on current layout
+        let (pod_col, ep_col, _det_col) = Self::calculate_adaptive_sizes(self.n_col, &self.active_panel);
+        
         match self.active_panel {
             ActivePanel::PodcastMenu => {
-                self.podcast_menu.highlight_selected();
+                if pod_col > 0 {
+                    self.podcast_menu.highlight_selected();
+                }
             }
             ActivePanel::EpisodeMenu => {
-                self.podcast_menu.highlight_selected();
-                self.episode_menu.highlight_selected();
+                // Only highlight podcast menu if it's visible (has width > 0)
+                if pod_col > 0 {
+                    self.podcast_menu.highlight_selected();
+                }
+                if ep_col > 0 {
+                    self.episode_menu.highlight_selected();
+                }
             }
             _ => (),
         }
