@@ -465,6 +465,12 @@ impl<'a> Ui<'a> {
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.handle_mouse_drag(mouse_event.column, mouse_event.row)
             }
+            MouseEventKind::ScrollDown => {
+                self.handle_mouse_wheel_down()
+            }
+            MouseEventKind::ScrollUp => {
+                self.handle_mouse_wheel_up()
+            }
             _ => UiMsg::Noop,
         }
     }
@@ -703,6 +709,20 @@ impl<'a> Ui<'a> {
 
         // Reset mouse state
         self.mouse_state = MouseState::default();
+    }
+
+    /// Handles mouse wheel down events - acts as next item selection
+    fn handle_mouse_wheel_down(&mut self) -> UiMsg {
+        let (curr_pod_id, _curr_ep_id) = self.get_current_ids();
+        self.scroll_current_window(curr_pod_id, Scroll::Up(1));
+        UiMsg::Noop
+    }
+
+    /// Handles mouse wheel up events - acts as previous item selection  
+    fn handle_mouse_wheel_up(&mut self) -> UiMsg {
+        let (curr_pod_id, _curr_ep_id) = self.get_current_ids();
+        self.scroll_current_window(curr_pod_id, Scroll::Down(1));
+        UiMsg::Noop
     }
 
     /// Resize all the windows on the screen and redraw them.
